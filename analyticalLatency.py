@@ -25,7 +25,9 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         E = (H - R + Stride)/Stride
         F = (W - S + Stride)/Stride
     
-        ## Reduce to Mat mul of A x B and  B X C
+        # Reduce to Mat mul of A x B and  B X C
+        # Matrix Dimension 1: numInput * numTime 
+        # Matrix Dimension 2: numTime * numFilter
         numInput = E * F
         numTime  = R * S * C
         numFilter= M
@@ -34,30 +36,57 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         numFolds = 0 ## To compute avearge
         weightedUtili = 0.0
         avgUtilization = 0.0
-        maxBandwidth = 0.0
+        maxReadBandwidth = 0.0
+        maxWriteBandwidth = 0.0
 
         cycles = 0
         cycles = (numInput//arrX) * (numFilter//arrY) * (numTime + arrX + arrY - 1)
         numFolds = (numInput//arrX) * (numFilter//arrY)
         weightedUtili = (numInput//arrX) * (numFilter//arrY) * 1.0
         
+        if numFolds != 0:
+            maxReadBandwidth = arrX * numTime + numTime * arrY
+            maxWriteBandwidth = arrX * arrY
+
         if numInput % arrX > 0:
             cycles = cycles + (numFilter//arrY) * (numTime + (numInput % arrX) + arrY - 1)
             numFolds += (numFilter//arrY)
             weightedUtili += (numFilter//arrY) * ((numInput % arrX)*arrY/(arrX * arrY))
+
+            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * arrY)
+            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*arrY)
         
         if numFilter % arrY > 0:
             cycles = cycles + (numInput//arrX) * (numTime + arrX + (numFilter % arrY) - 1)
             numFolds += (numInput//arrX)
             weightedUtili += (numInput//arrX) * (arrX*(numFilter % arrY)/(arrX * arrY))
 
+            maxReadBandwidth = max(maxReadBandwidth, arrX * numTime + numTime * (numFilter % arrY) )
+            maxWriteBandwidth = max(maxWriteBandwidth, arrX*(numFilter % arrY))
+
         if numInput % arrX > 0 and numFilter % arrY > 0:
             cycles = cycles + (numTime + (numInput % arrX) + (numFilter % arrY) - 1)
             numFolds += 1
             weightedUtili += 1 * ((numInput % arrX)*(numFilter % arrY)/(arrX * arrY))
 
+            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * (numFilter % arrY))
+            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*(numFilter % arrY))
+        
         avgUtilization = weightedUtili/numFolds
-        return math.ceil(cycles), avgUtilization
+        return math.ceil(cycles), avgUtilization, maxReadBandwidth, maxWriteBandwidth
+
+class Bandwidth:
+    def __init__(self):
+        self.layerReadBW = []
+        self.layerWriteBW = []
+        self.readBW = 0
+        self.writeBW = 0
+
+    def update(self, read, write):
+        self.layerReadBW.append(read)
+        self.layerWriteBW.append(write)
+        self.readBW = max(read, self.readBW)
+        self.writeBW = max(write, self.writeBW)
 
 class Latency:
     def __init__(self):
@@ -79,16 +108,11 @@ class Utilization:
         self.layercount += 1
         self.avgUtilization = self.sum/self.layercount
 
-    def updateFuSe(self, utili):
-        self.layerwiseUtilization.append(utili)
-        self.sum += 0.5 * utili
-        self.layercount += 0.5
-        self.avgUtilization = self.sum/self.layercount
-
 class ForwardHook:
     def __init__(self, arraySizeX, arraySizeY, hardware):
         self.latency = Latency()
         self.utilize = Utilization()
+        self.bandwidth = Bandwidth()
         self.arraySizeX = arraySizeX
         self.arraySizeY = arraySizeY
         assert hardware == 'FuSe'or hardware == 'Systolic'
@@ -107,14 +131,16 @@ class ForwardHook:
             inDim_h = inDim_h + 2*p_h
             inDim_w = inDim_w + 2*p_w
             
+            t = 0
             # Groups == 1. Normal Convolution. Maps as GEMM op on Systolic and FuSe.
             if g == 1:
-                t, u = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=inC,strides=s_h, num_filt=outC)
                 # print('Group=1 ', inDim_h, inDim_w, k_h, k_w, inC, outC, t)
                 self.utilize.update(u)
+                self.bandwidth.update(r,w)
                 if k_h == 1 and k_w == 1:
                     self.latency.pointwiseConv += t
                 else:
@@ -124,79 +150,65 @@ class ForwardHook:
             else:
                 # If Systolic Hardware: Do Poor Utiliation GEMM. With 1 channel and 1 filter.
                 if self.hardware == 'Systolic':
-                    t, u = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                    t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=1,strides=s_h, num_filt=1)
                     t = t*outC
                     self.utilize.update(u)
+                    self.bandwidth.update(r,w)
                     self.latency.depthwiseConv += t
                 
                 elif self.hardware == 'FuSe':
                     # On FuSe, If its spatial DW conv, do poor utilization GEMM
                     # Else with FuSe networks, do FuseConv
                     if k_h != 1 and k_w != 1:
-                        t, u = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                        t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=1,strides=s_h, num_filt=1)
                         t = t*outC
                         self.utilize.update(u)
+                        self.bandwidth.update(r,w)
                         self.latency.depthwiseConv += t
-                    # Case: 1 x K kernel
+                    # Case: 1 x K kernel. Assume 1 x K and K x1 kernel occur symmetrica l. So double the latency and use same utilization.
                     elif k_h == 1:
                         # No of 1D convs performed.
                         # No of Folds in X direction. 
                         # No of Folds in Y direction.
                         # Time for one Fold  (Compute happens only in Y direction.0 
-                        num1Dconv = inDim_h * outC 
+                        num1Dconv = inDim_h * outC
                         numFoldsX = num1Dconv/self.arraySizeX
                         numFoldsY = inDim_w/self.arraySizeY
                         oneFoldTime = self.arraySizeY + k_w
 
-                        t = math.ceil((math.ceil(numFoldsX)/s_w)*(oneFoldTime*math.ceil(numFoldsY)))
+                        t = 2*math.ceil((math.ceil(numFoldsX)/s_w)*(oneFoldTime*math.ceil(numFoldsY)))
                         self.latency.depthwiseConv += t
 
-                        ## Utilization
+                        ## Utilization and Bandwidth
                         outDim_h = inDim_h/s_h
                         outDim_w = (inDim_w-k_w+1)/s_w
 
                         if outDim_h >= self.arraySizeX:
                             if outDim_w >= self.arraySizeY:
                                 u = 1.0
+                                r = arraySizeX * (arraySizeY + k_w)
+                                w = arraySizeX * arraySizeY
                             else: 
                                 u = outDim_w/self.arraySizeY
+                                r = arraySizeX * (outDim_w + k_w)
+                                w = arraySizeX * outDim_w
                         else:
                             if outDim_w >= self.arraySizeY:
                                 u = outDim_h/self.arraySizeX
+                                r = outDim_h * (arraySizeY + k_w)
+                                w = outDim_h * arraySizeY
                             else: 
                                 u = (outDim_h/self.arraySizeX)*(outDim_w/self.arraySizeY)
-                        
-                        self.utilize.updateFuSe(u)
-                    # Case : K x 1 kernel
-                    elif k_w == 1:
-                        num1Dconv = inDim_w * outC
-                        numFoldsX = num1Dconv/self.arraySizeY
-                        numFoldsY = inDim_h/self.arraySizeX
-                        oneFoldTime = self.arraySizeX + k_h
-                        t = math.ceil((math.ceil(numFoldsX)/s_h)*(oneFoldTime*math.ceil(numFoldsY)))
-                        self.latency.depthwiseConv += t
-
-                        ## Utilization
-                        outDim_h = (inDim_h-k_h+1)/s_h
-                        outDim_w = (inDim_w)/s_w
-
-                        if outDim_w >= self.arraySizeX:
-                            if outDim_h >= self.arraySizeY:
-                                u = 1.0
-                            else: 
-                                u = outDim_h/self.arraySizeY
-                        else:
-                            if outDim_h >= self.arraySizeY:
-                                u = outDim_w/self.arraySizeX
-                            else: 
-                                u = (outDim_w/self.arraySizeX)*(outDim_h/self.arraySizeY)
-                        self.utilize.updateFuSe(u)
+                                r = outDim_h * (outDim_w + k_w)
+                                w = outDim_h * outDim_w
+                        self.utilize.update(u)
+                        self.bandwidth.update(r,w)
 
             self.latency.time += t
         
@@ -206,17 +218,19 @@ class ForwardHook:
             assert inDim_h == 1
             inC = module.in_features
             outC = module.out_features
-            t, u = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+            t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
                                 ifmap_h=1, ifmap_w=1,
                                 filt_h=1, filt_w=1,
                                 num_channels=inC,strides=1, num_filt=outC)
             self.utilize.update(u)
+            self.bandwidth.update(r,w)
             self.latency.otherConv += t
             self.latency.time += t
     
     def clear(self):
         self.latency = Latency()
         self.utilize = Utilization()
+        self.bandwidth = Bandwidth()
 
 def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):    
     hookfn = ForwardHook(arraySizeX, arraySizeY, hardware)
@@ -243,6 +257,19 @@ def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
     hookfn.clear()
     return layerUtili, avgUtili
 
+def getModelBandw(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):    
+    hookfn = ForwardHook(arraySizeX, arraySizeY, hardware)
+    for layer in model.modules():
+        if isinstance(layer, nn.Conv2d):
+            layer.register_forward_hook(hookfn)
+        elif isinstance(layer, nn.Linear):
+            layer.register_forward_hook(hookfn)
+    model(x)
+    readBWlist = hookfn.bandwidth.layerReadBW
+    writeBWlist = hookfn.bandwidth.layerWriteBW
+    hookfn.clear()
+    return readBWlist, writeBWlist
+
 # def getModelLatencyBreakdown(model, x, mode='analytical', arraySize=8):    
 #     hookfn = ForwardHook(arraySize, mode)
 #     for layer in model.modules():
@@ -261,17 +288,23 @@ def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
 
 x = torch.randn([1,3,224,224])
 hardware = 'Systolic' ## or 'FuSe'
-arraySizeX = 8
-arraySizeY = 8
+arraySizeX = 64
+arraySizeY = 64
 from models import *
-supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
-supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+# supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
+supernet = [MobileNetV3('large', 1000)]
+# supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+supernetf1 = [MobileNetV3Friendly('large', 1000)]
 for net in supernet:
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
-    print(b)
+    # a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
+    a, b = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
 print("Friendly")
 for net in supernetf1:
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
-    print(b)
+    # a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
+    c, d = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
+
+for i in range(len(a)):
+    if a[i] != c[i]:
+        print(a[i], c[i], b[i], d[i])
