@@ -71,9 +71,9 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         inp_grad_cycles, inp_grad_utilization = computeCycles(numInput, numTime, numFilter, arrX, arrY)
 
         ## Weight Gradients (M x NEF with NEF x RSC to get M x RSC)
-        numInput  = M
+        numInput  = R * S * C
         numTime   = N * E * F
-        numFilter = R * S * C
+        numFilter = M
 
         wgt_grad_cycles, wgt_grad_utilization = computeCycles(numInput, numTime, numFilter, arrX, arrY)
 
