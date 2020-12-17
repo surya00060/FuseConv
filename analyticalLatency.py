@@ -57,6 +57,7 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         F = (W - S + Stride)/Stride
 
         ## Reduce to Mat mul of A x B and  B X C - Forward Pass (M x RSC with RSC x NEF to get M x NEF)
+        ## Assuming M1: numFilter * numTime, M2: numTime * numInput
         numInput = N * E * F
         numTime  = R * S * C
         numFilter= M
@@ -134,6 +135,8 @@ class ForwardHook:
             g = module.groups
             inDim_h = inDim_h + 2*p_h
             inDim_w = inDim_w + 2*p_w
+            outDim_h = (inDim_h - k_h + 2*p_h + s_h) / s_h
+            outDim_w = (inDim_w - k_w + 2*p_w + s_w) / s_w
 
             # Groups == 1. Normal Convolution. Maps as GEMM op on Systolic and FuSe.
             if g == 1:
@@ -197,8 +200,28 @@ class ForwardHook:
                         oneFoldTime = self.arraySizeY + k_w
 
                         t = math.ceil((math.ceil(numFoldsX)/s_w)*(oneFoldTime*math.ceil(numFoldsY)))
+
+                        #Calculating Weight Gradients (Convolution between Output gradients and Input (Transposed?))
+                        numInput  = k_h * k_w
+                        numTime   = batch_size * outDim_h * outDim_w
+                        numFilter = 1
+
+                        wt, wu = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
+
+                        wt = wt*inC
+
+                        ## Calculating Input Gradients
+                        num1Dconvinp = batch_size * outDim_h * inC
+                        numFoldsXinp = num1Dconvinp/self.arraySizeX
+                        numFoldsYinp = outDim_w/self.arraySizeY
+                        oneFoldTime = self.arraySizeY + k_w
+
+                        it = math.ceil((math.ceil(numFoldsXinp)/s_w)*(oneFoldTime*math.ceil(numFoldsYinp)))
+
                         self.latency.depthwiseConv += t
                         self.latency.flayerwise.append(t)
+                        self.latency.wlayerwise.append(wt)
+                        self.latency.ilayerwise.append(it)
 
                         ## Utilization
                         outDim_h = inDim_h/s_h
@@ -224,8 +247,29 @@ class ForwardHook:
                         numFoldsY = inDim_h/self.arraySizeX
                         oneFoldTime = self.arraySizeX + k_h
                         t = math.ceil((math.ceil(numFoldsX)/s_h)*(oneFoldTime*math.ceil(numFoldsY)))
+
+                        ## Calculating Weight Gradients
+                        numInput  = k_h * k_w
+                        numTime   = batch_size * outDim_h * outDim_w
+                        numFilter = 1
+
+                        wt, wu = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
+
+                        wt = wt*inC
+
+                        ## Calculating Input Gradients
+                        num1Dconvinp = batch_size * outDim_w * inC
+                        numFoldsXinp = num1Dconvinp/self.arraySizeX
+                        numFoldsYinp = outDim_h/self.arraySizeY
+                        oneFoldTime = self.arraySizeY + k_h
+
+                        it = math.ceil((math.ceil(numFoldsXinp)/s_h)*(oneFoldTime*math.ceil(numFoldsYinp)))
+
                         self.latency.depthwiseConv += t
                         self.latency.flayerwise.append(t)
+                        self.latency.wlayerwise.append(wt)
+                        self.latency.ilayerwise.append(it)
+
 
                         ## Utilization
                         outDim_h = (inDim_h-k_h+1)/s_h
@@ -248,7 +292,7 @@ class ForwardHook:
         elif isinstance(module, nn.Linear):
             inT = module_in[0]
             inDim_h, inDim_w = (inT.shape[0], inT.shape[1])
-            assert inDim_h == 1
+            #assert inDim_h == 1 ## Why is this assert there?
             inC = module.in_features
             outC = module.out_features
             t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
@@ -276,12 +320,14 @@ def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', n
             #layer.register_backward_hook(bhookfn)
     model(x)
     latency = fhookfn.latency.time
-    fwd_pass = fhookfn.latency.layerwise
+    fwd_pass = fhookfn.latency.flayerwise
+    wgt_grad = fhookfn.latency.wlayerwise
+    inp_grad = fhookfn.latency.ilayerwise
     #back_inp_grad = bhookfn.latency.inplayerwise
     #back_wgt_grad = bhookfn.latency.wgtlayerwise
     fhookfn.clear()
     #bhookfn.clear()
-    return latency, fwd_pass
+    return latency, fwd_pass, wgt_grad, inp_grad
     #return latency, fwd_pass, back_inp_grad, back_wgt_grad
 
 def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', numNPU=1, parallel_strategy = "Data"):
@@ -313,19 +359,23 @@ def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', num
 #     hookfn.clear()
 #     return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
 
-x = torch.randn([1,3,224,224])
+x = torch.randn([512,3,224,224])
 hardware = 'Systolic' ## or 'FuSe'
-arraySizeX = 8
-arraySizeY = 8
+arraySizeX = 256
+arraySizeY = 256
 from models import *
 supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
 supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
 for net in supernet:
+    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'Systolic', numNPU=16)
+    print(fl[1],',', wl[1],',', il[1])
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
-    print(b)
+    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
+    #print(b)
 print("Friendly")
 for net in supernetf1:
+    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'FuSe', numNPU=16)
+    print(fl[1],',',wl[1],',',il[1])
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
-    print(b)
+    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
+    #print(b)
