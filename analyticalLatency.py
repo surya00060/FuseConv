@@ -81,7 +81,9 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
 
 class Latency:
     def __init__(self):
-        self.layerwise = []
+        self.flayerwise = []
+        self.ilayerwise = []
+        self.wlayerwise = []
         self.time = 0
         self.pointwiseConv = 0
         self.depthwiseConv = 0
@@ -188,15 +190,15 @@ class ForwardHook:
                         # No of Folds in X direction.
                         # No of Folds in Y direction.
                         # Time for one Fold  (Compute happens only in Y direction.0)
-                        # N to accommodate batch-size
-                        num1Dconv = N * inDim_h * outC
+                        # accommodating batch-size
+                        num1Dconv = batch_size * inDim_h * outC
                         numFoldsX = num1Dconv/self.arraySizeX
                         numFoldsY = inDim_w/self.arraySizeY
                         oneFoldTime = self.arraySizeY + k_w
 
                         t = math.ceil((math.ceil(numFoldsX)/s_w)*(oneFoldTime*math.ceil(numFoldsY)))
                         self.latency.depthwiseConv += t
-                        self.latency.layerwise.append(t)
+                        self.latency.flayerwise.append(t)
 
                         ## Utilization
                         outDim_h = inDim_h/s_h
@@ -215,15 +217,15 @@ class ForwardHook:
 
                         self.utilize.updateFuSe(u)
                     # Case : K x 1 kernel
-                    # N to accommodate batch size
+                    # Accommodating batch size
                     elif k_w == 1:
-                        num1Dconv = N * inDim_w * outC
+                        num1Dconv = batch_size * inDim_w * outC
                         numFoldsX = num1Dconv/self.arraySizeY
                         numFoldsY = inDim_h/self.arraySizeX
                         oneFoldTime = self.arraySizeX + k_h
                         t = math.ceil((math.ceil(numFoldsX)/s_h)*(oneFoldTime*math.ceil(numFoldsY)))
                         self.latency.depthwiseConv += t
-                        self.latency.layerwise.append(t)
+                        self.latency.flayerwise.append(t)
 
                         ## Utilization
                         outDim_h = (inDim_h-k_h+1)/s_h
@@ -249,7 +251,7 @@ class ForwardHook:
             assert inDim_h == 1
             inC = module.in_features
             outC = module.out_features
-            t, u = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
+            t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
                                 ifmap_h=1, ifmap_w=1,
                                 filt_h=1, filt_w=1,
                                 num_channels=inC,strides=1, num_filt=outC)
@@ -282,7 +284,7 @@ def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', n
     return latency, fwd_pass
     #return latency, fwd_pass, back_inp_grad, back_wgt_grad
 
-def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
+def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', numNPU=1, parallel_strategy = "Data"):
     hookfn = ForwardHook(arraySizeX, arraySizeY, hardware, numNPU, parallel_strategy)
     for layer in model.modules():
         if isinstance(layer, nn.Conv2d):
