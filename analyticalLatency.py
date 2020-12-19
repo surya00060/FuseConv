@@ -16,29 +16,57 @@ def computeCycles(numInput, numTime, numFilter, arrX, arrY):
         weightedUtili = 0.0
         avgUtilization = 0.0
         maxBandwidth = 0.0
+        maxReadBandwidth = 0.0
+        maxWriteBandwidth = 0.0
 
         cycles = 0
         cycles = (numInput//arrX) * (numFilter//arrY) * (numTime + arrX + arrY - 1)
         numFolds = (numInput//arrX) * (numFilter//arrY)
         weightedUtili = (numInput//arrX) * (numFilter//arrY) * 1.0
 
+        if numFolds != 0:
+            maxReadBandwidth = arrX * numTime + numTime * arrY
+            maxWriteBandwidth = arrX * arrY
+
         if numInput % arrX > 0:
             cycles = cycles + (numFilter//arrY) * (numTime + (numInput % arrX) + arrY - 1)
             numFolds += (numFilter//arrY)
             weightedUtili += (numFilter//arrY) * ((numInput % arrX)*arrY/(arrX * arrY))
+
+            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * arrY)
+            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*arrY)
 
         if numFilter % arrY > 0:
             cycles = cycles + (numInput//arrX) * (numTime + arrX + (numFilter % arrY) - 1)
             numFolds += (numInput//arrX)
             weightedUtili += (numInput//arrX) * (arrX*(numFilter % arrY)/(arrX * arrY))
 
+            maxReadBandwidth = max(maxReadBandwidth, arrX * numTime + numTime * (numFilter % arrY) )
+            maxWriteBandwidth = max(maxWriteBandwidth, arrX*(numFilter % arrY))
+
         if numInput % arrX > 0 and numFilter % arrY > 0:
             cycles = cycles + (numTime + (numInput % arrX) + (numFilter % arrY) - 1)
             numFolds += 1
             weightedUtili += 1 * ((numInput % arrX)*(numFilter % arrY)/(arrX * arrY))
 
+            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * (numFilter % arrY))
+            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*(numFilter % arrY))
+
         avgUtilization = weightedUtili/numFolds
-        return cycles, avgUtilization
+        return cycles, avgUtilization, maxReadBandwidth, maxWriteBandwidth
+
+class Bandwidth:
+    def __init__(self):
+        self.layerReadBW = []
+        self.layerWriteBW = []
+        self.readBW = 0
+        self.writeBW = 0
+
+    def update(self, read, write):
+        self.layerReadBW.append(read)
+        self.layerWriteBW.append(write)
+        self.readBW = max(read, self.readBW)
+        self.writeBW = max(write, self.writeBW)
 
 def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
             num_channels, strides, num_filt, batch_size = 1):
@@ -62,23 +90,23 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         numTime  = R * S * C
         numFilter= M
 
-        fcycles, favgUtilization = computeCycles(numInput, numTime, numFilter, arrX, arrY)
+        fcycles, favgUtilization, fmaxReadBW, fmaxWriteBW = computeCycles(numInput, numTime, numFilter, arrX, arrY)
 
         ## Input Gradients (RSC x M with M x NEF to get RSC x NEF)
         numInput  = N * E * F
         numTime   = M
         numFilter = R * S * C
 
-        inp_grad_cycles, inp_grad_utilization = computeCycles(numInput, numTime, numFilter, arrX, arrY)
+        inp_grad_cycles, inp_grad_utilization, imaxReadBW, imaxWriteBW = computeCycles(numInput, numTime, numFilter, arrX, arrY)
 
         ## Weight Gradients (M x NEF with NEF x RSC to get M x RSC)
         numInput  = R * S * C
         numTime   = N * E * F
         numFilter = M
 
-        wgt_grad_cycles, wgt_grad_utilization = computeCycles(numInput, numTime, numFilter, arrX, arrY)
-
-        return math.ceil(fcycles), favgUtilization, math.ceil(inp_grad_cycles), inp_grad_utilization, math.ceil(wgt_grad_cycles), wgt_grad_utilization
+        wgt_grad_cycles, wgt_grad_utilization, wmaxReadBW, wmaxWriteBW = computeCycles(numInput, numTime, numFilter, arrX, arrY)
+        #Vin: Returning only Forward Pass bandwidths for now -- if required, we can others
+        return math.ceil(fcycles), favgUtilization, math.ceil(inp_grad_cycles), inp_grad_utilization, math.ceil(wgt_grad_cycles), wgt_grad_utilization, fmaxReadBW, fmaxWriteBW
 
 class Latency:
     def __init__(self):
@@ -113,6 +141,7 @@ class ForwardHook:
     def __init__(self, arraySizeX, arraySizeY, hardware, numNPU = 1, parallel_strategy = None):
         self.latency = Latency()
         self.utilize = Utilization()
+        self.bandwidth = Bandwidth()
         self.arraySizeX = arraySizeX
         self.arraySizeY = arraySizeY
         self.numNPU = numNPU
@@ -135,17 +164,18 @@ class ForwardHook:
             g = module.groups
             inDim_h = inDim_h + 2*p_h
             inDim_w = inDim_w + 2*p_w
-            outDim_h = (inDim_h - k_h + 2*p_h + s_h) / s_h
-            outDim_w = (inDim_w - k_w + 2*p_w + s_w) / s_w
+            outDim_h = (inDim_h - k_h + s_h) / s_h
+            outDim_w = (inDim_w - k_w + s_w) / s_w
 
             # Groups == 1. Normal Convolution. Maps as GEMM op on Systolic and FuSe.
             if g == 1:
-                t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
+                t, u, it, iu, wt, wu, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=inC,strides=s_h, num_filt=outC, batch_size = batch_size)
                 # print('Group=1 ', inDim_h, inDim_w, k_h, k_w, inC, outC, t)
                 self.utilize.update(u)
+                self.bandwidth.update(r,w)
                 if k_h == 1 and k_w == 1:
                     self.latency.pointwiseConv += t
                 else:
@@ -158,7 +188,7 @@ class ForwardHook:
             else:
                 # If Systolic Hardware: Do Poor Utiliation GEMM. With 1 channel and 1 filter.
                 if self.hardware == 'Systolic':
-                    t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
+                    t, u, it, iu, wt, wu, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=1,strides=s_h, num_filt=1, batch_size = batch_size)
@@ -166,6 +196,7 @@ class ForwardHook:
                     it = it*outC
                     wt = wt*outC
                     self.utilize.update(u)
+                    self.bandwidth.update(r,w)
                     self.latency.depthwiseConv += t
                     self.latency.flayerwise.append(t)
                     self.latency.ilayerwise.append(it)
@@ -175,7 +206,7 @@ class ForwardHook:
                     # On FuSe, If its spatial DW conv, do poor utilization GEMM
                     # Else with FuSe networks, do FuseConv
                     if k_h != 1 and k_w != 1:
-                        t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
+                        t, u, it, iu, wt, wu, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
                                 ifmap_h=inDim_h, ifmap_w=inDim_w,
                                 filt_h=k_h, filt_w=k_w,
                                 num_channels=1,strides=s_h, num_filt=1, batch_size = batch_size)
@@ -183,6 +214,7 @@ class ForwardHook:
                         it = it*outC
                         wt = wt*outC
                         self.utilize.update(u)
+                        self.bandwidth.update(r,w)
                         self.latency.depthwiseConv += t
                         self.latency.flayerwise.append(t)
                         self.latency.ilayerwise.append(it)
@@ -206,9 +238,9 @@ class ForwardHook:
                         numTime   = batch_size * outDim_h * outDim_w
                         numFilter = 1
 
-                        wt, wu = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
+                        wt, wu, rb, wb = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
 
-                        wt = wt*inC
+                        wt = wt*outC
 
                         ## Calculating Input Gradients
                         num1Dconvinp = batch_size * outDim_h * inC
@@ -230,15 +262,24 @@ class ForwardHook:
                         if outDim_h >= self.arraySizeX:
                             if outDim_w >= self.arraySizeY:
                                 u = 1.0
+                                r = arraySizeX * (arraySizeY + k_w)
+                                w = arraySizeX * outDim_w
                             else:
                                 u = outDim_w/self.arraySizeY
+                                r = arraySizeX * (outDim_w + k_w)
+                                w = arraySizeX * outDim_w
                         else:
                             if outDim_w >= self.arraySizeY:
                                 u = outDim_h/self.arraySizeX
+                                r = outDim_h * (arraySizeY + k_w)
+                                w = outDim_h * arraySizeY
                             else:
                                 u = (outDim_h/self.arraySizeX)*(outDim_w/self.arraySizeY)
+                                r = outDim_h * (outDim_w + k_w)
+                                w = outDim_h * outDim_w
 
                         self.utilize.updateFuSe(u)
+                        self.bandwidth.update(r,w)
                     # Case : K x 1 kernel
                     # Accommodating batch size
                     elif k_w == 1:
@@ -253,9 +294,9 @@ class ForwardHook:
                         numTime   = batch_size * outDim_h * outDim_w
                         numFilter = 1
 
-                        wt, wu = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
+                        wt, wu, rb, wb = computeCycles(numInput, numTime, numFilter, self.arraySizeX, self.arraySizeY)
 
-                        wt = wt*inC
+                        wt = wt*outC
 
                         ## Calculating Input Gradients
                         num1Dconvinp = batch_size * outDim_w * inC
@@ -278,14 +319,23 @@ class ForwardHook:
                         if outDim_w >= self.arraySizeX:
                             if outDim_h >= self.arraySizeY:
                                 u = 1.0
+                                r = arraySizeY * (arraySizeX + k_h)
+                                w = arraySizeX * arraySizeY
                             else:
                                 u = outDim_h/self.arraySizeY
+                                r = arraySizeY * (outDim_h + k_h)
+                                w = arraySizeX * outDim_h
                         else:
                             if outDim_h >= self.arraySizeY:
                                 u = outDim_w/self.arraySizeX
+                                r = outDim_w * (arraySizeX + k_h)
+                                w = outDim_w * arraySizeX
                             else:
                                 u = (outDim_w/self.arraySizeX)*(outDim_h/self.arraySizeY)
+                                r = outDim_w * (outDim_h + k_h)
+                                w = outDim_w * outDim_h
                         self.utilize.updateFuSe(u)
+                        self.bandwidth.update(r,w)
 
             self.latency.time += t
 
@@ -295,18 +345,20 @@ class ForwardHook:
             #assert inDim_h == 1 ## Why is this assert there?
             inC = module.in_features
             outC = module.out_features
-            t, u, it, iu, wt, wu = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
+            t, u, it, iu, wt, wu, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY,
                                 ifmap_h=1, ifmap_w=1,
                                 filt_h=1, filt_w=1,
                                 num_channels=inC,strides=1, num_filt=outC)
             ## Not updating the layerwise time as of now! ~Vin
             self.utilize.update(u)
+            self.bandwidth.update(r,w)
             self.latency.otherConv += t
             self.latency.time += t
 
     def clear(self):
         self.latency = Latency()
         self.utilize = Utilization()
+        self.bandwidth = Bandwidth()
 
 def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', numNPU=1, parallel_strategy="Data"):
     fhookfn = ForwardHook(arraySizeX, arraySizeY, hardware, numNPU, parallel_strategy)
@@ -329,6 +381,19 @@ def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', n
     #bhookfn.clear()
     return latency, fwd_pass, wgt_grad, inp_grad
     #return latency, fwd_pass, back_inp_grad, back_wgt_grad
+
+def getModelBandw(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
+    hookfn = ForwardHook(arraySizeX, arraySizeY, hardware)
+    for layer in model.modules():
+        if isinstance(layer, nn.Conv2d):
+            layer.register_forward_hook(hookfn)
+        elif isinstance(layer, nn.Linear):
+            layer.register_forward_hook(hookfn)
+    model(x)
+    readBWlist = hookfn.bandwidth.layerReadBW
+    writeBWlist = hookfn.bandwidth.layerWriteBW
+    hookfn.clear()
+    return readBWlist, writeBWlist
 
 def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', numNPU=1, parallel_strategy = "Data"):
     hookfn = ForwardHook(arraySizeX, arraySizeY, hardware, numNPU, parallel_strategy)
@@ -359,23 +424,31 @@ def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', num
 #     hookfn.clear()
 #     return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
 
-x = torch.randn([512,3,224,224])
+x = torch.randn([1,3,224,224])
 hardware = 'Systolic' ## or 'FuSe'
 arraySizeX = 256
 arraySizeY = 256
 from models import *
 supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
 supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+l = 0
+numNPU = 1
 for net in supernet:
-    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'Systolic', numNPU=16)
-    print(fl[1],',', wl[1],',', il[1])
+    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'Systolic', numNPU=numNPU)
+    print(l, sum(fl), sum(wl), sum(il))
+    a, b = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
     #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
     #print(b)
 print("Friendly")
 for net in supernetf1:
-    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'FuSe', numNPU=16)
-    print(fl[1],',',wl[1],',',il[1])
+    ll, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'FuSe', numNPU=numNPU)
+    print(ll, sum(fl), sum(wl), sum(il), l/ll)
+    c, d = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
     #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
     #print(b)
+
+for i in range(len(a)):
+    if a[i] != c[i]:
+        print(a[i], c[i], b[i], d[i])
