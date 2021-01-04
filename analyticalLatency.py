@@ -81,8 +81,8 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         arrX = dimension_rows
         arrY = dimension_cols
 
-        E = (H - R + Stride)/Stride
-        F = (W - S + Stride)/Stride
+        E = (H - R + Stride)//Stride
+        F = (W - S + Stride)//Stride
 
         ## Reduce to Mat mul of A x B and  B X C - Forward Pass (M x RSC with RSC x NEF to get M x NEF)
         ## Assuming M1: numFilter * numTime, M2: numTime * numInput
