@@ -3,7 +3,7 @@ import sys
 import time
 import math
 import math
-
+from models import *
 import torch
 import torch.nn as nn
 import torch.nn.init as init
@@ -424,31 +424,84 @@ def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic', num
 #     hookfn.clear()
 #     return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
 
-x = torch.randn([1,3,224,224])
-hardware = 'Systolic' ## or 'FuSe'
-arraySizeX = 256
-arraySizeY = 256
-from models import *
-supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
-supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
-l = 0
-numNPU = 1
-for net in supernet:
-    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'Systolic', numNPU=numNPU)
-    print(l, sum(fl), sum(wl), sum(il))
-    a, b = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
-    #print(b)
-print("Friendly")
-for net in supernetf1:
-    ll, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'FuSe', numNPU=numNPU)
-    print(ll, sum(fl), sum(wl), sum(il), l/ll)
-    c, d = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
-    #print(b)
 
-for i in range(len(a)):
-    if a[i] != c[i]:
-        print(a[i], c[i], b[i], d[i])
+import plotly
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
+pio.orca.config.use_xvfb = True
+
+def bandwidth_and_utilization(net, x, arrayX, arrayY, hardware='Systolic'):
+    namestr = 'Layer'
+
+    read,write = getModelBandw(net, x, arrayX, arrayY, hardware)
+
+    layerUtili, avgUtil = getModelUtili(net, x, arrayX, arrayY, hardware, numNPU=1)
+
+
+    layerN = [namestr+str(i) for i in range(len(layerUtili))]
+
+    figure = make_subplots(specs=[[{"secondary_y": True}]])
+
+    figure.add_trace(
+            go.Bar(x = layerN, y = read,  name = "Read Bandwidth"),
+         #   go.Bar(x = layerN, y = write, name = "Write Bandwidth"),
+            secondary_y=False,
+    )
+
+    figure.add_trace(
+            go.Bar(x = layerN, y = write, name = "Write Bandwidth"),
+            secondary_y = False,
+    )
+
+    figure.add_trace(
+            go.Scatter(x = layerN, y = layerUtili, line=dict(color='grey', width=4, dash='dashdot'), name = "Utilization"),
+            secondary_y=True,
+    )
+
+    figure.update_xaxes(title_text="MobileNetV3-Large")
+    figure.update_yaxes(title_text="Bandwidth", secondary_y=False)
+    figure.update_yaxes(title_text="Utilization", secondary_y=True)
+    figure.update_layout(width = 1000, height = 500)
+
+    figure.write_image('bandwidth_util.png')
+
+
+
+
+def main():
+    net = MobileNetV3Friendly('large', 1000)
+    x = torch.randn([1,3,224,224])
+
+    bandwidth_and_utilization(net,x, arrayX=256, arrayY=256, hardware='FuSe')
+    #x = torch.randn([1,3,224,224])
+    #hardware = 'Systolic' ## or 'FuSe'
+    #arraySizeX = 256
+    #arraySizeY = 256
+    #from models import *
+    #supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
+    #supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+    #l = 0
+    #numNPU = 1
+    #for net in supernet:
+    #    l, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'Systolic', numNPU=numNPU)
+    #    print(l, sum(fl), sum(wl), sum(il))
+    #    a, b = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
+    #    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
+    #    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
+    #    #print(b)
+    #print("Friendly")
+    #for net in supernetf1:
+    #    ll, fl, wl, il = getModelLatency(net, x, arraySizeX, arraySizeY, 'FuSe', numNPU=numNPU)
+    #    print(ll, sum(fl), sum(wl), sum(il), l/ll)
+    #    c, d = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
+    #    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
+    #    #a, b = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
+    #    #print(b)
+
+    #for i in range(len(a)):
+    #    if a[i] != c[i]:
+    #        print(a[i], c[i], b[i], d[i])
+
+if __name__ == '__main__':
+    main()
