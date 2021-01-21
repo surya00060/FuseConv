@@ -83,7 +83,7 @@ fig.update_layout(
 )
 
 fig.update_layout(barmode='group', xaxis_tickangle=0)
-fig.write_image("fig1.pdf")
+fig.write_image("fig1.png")
 
 #####
 
@@ -109,6 +109,7 @@ fig.update_layout(
     title_font_color="red", font_size=14, width=300, height=400,
     legend_x = 0.43, legend_y = 1,
     legend_font_color = 'black',
+    plot_bgcolor= 'rgba(0, 0, 0, 0)',
     paper_bgcolor='rgba(0,0,0,0)'
     )
 
@@ -136,7 +137,7 @@ fig.update_layout(
     ]
 )
 
-fig.write_image('fig2.pdf')
+fig.write_image('fig2.png')
 
 
 ######
@@ -238,6 +239,7 @@ fig.update_layout(
     title_font_color="red", font_size=14, width=400, height=400,
     legend_x = 1, legend_y = 1,
     legend_font_color = 'black',
+    plot_bgcolor='rgba(0, 0, 0, 0)',
     paper_bgcolor='rgba(0,0,0,0)'
     )
 
@@ -272,7 +274,7 @@ fig.update_layout(
         )
     ]
 )
-fig.write_image('fig3New.pdf')
+fig.write_image('fig3.png')
 
 #####
 
@@ -334,4 +336,4 @@ fig.update_layout(
     ]
 )
 
-fig.write_image('fig4.pdf')
+fig.write_image('fig4.png')
