@@ -244,7 +244,9 @@ def getModelLatency(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
             layer.register_forward_hook(hookfn)
     model(x)
     latency = hookfn.latency.time
+    print(hookfn.latency.time, hookfn.latency.depthwiseConv, hookfn.latency.pointwiseConv, hookfn.latency.otherConv)
     hookfn.clear()
+
     return latency
 
 def getModelUtili(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):    
@@ -289,28 +291,56 @@ def getModelBandw(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
 #     hookfn.clear()
 #     return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
 
-x = torch.randn([1,3,224,224])
-hardware = 'Systolic' ## or 'FuSe'
-arraySizeX = 64
-arraySizeY = 64
+import timm
+modellist = ['efficientnet_es',  'efficientnet_em', 'efficientnet_el']
+inputdim = [ 224, 240, 300]
+print("systolic")
+for i, name in enumerate(modellist):
+    net = timm.create_model(name, pretrained=False)
+    x = torch.randn([1, 3, inputdim[i],inputdim[i]])
+    hardware = 'Systolic' ## or 'FuSe'
+    arraySizeX = 256
+    arraySizeY = 256
+    lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+    print(name, lat)
+    
 from models import *
-# supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
-supernet = [MobileNetV3('large', 1000)]
-# supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
-supernetf1 = [MobileNetV3Friendly('large', 1000)]
-for net in supernet:
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    ua, ub = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
-    ba, bb = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
-for net in supernetf1:
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    uc, ud = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
-    bc, bd = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
+supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
+netname = ['mv1', 'mv2', 'mnas', 'mv3-s', 'mv3-l']
+for i, name in enumerate(netname):
+    net = supernet[i]
+    x = torch.randn(1, 3, 224,224)
+    hardware = 'Systolic' ## or 'FuSe'
+    arraySizeX = 64
+    arraySizeY = 64
+    lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+    print(name, lat)
 
-# print(max(a), max(b), max(c), max(d))
-print("Depthwise Convolution READ BW")
-for i in range(len(ba)):
-    if ba[i] != bc[i]:
-        print("Layer %d Bandwidth DW: %d  FuSe: %d Utilization DW: %f  FuSe: %f"%(i, ba[i], bc[i], ua[i]*100, uc[i]*100))
+print("Fuse Half")
+supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+for i, name in enumerate(netname):
+    net = supernetf1[i]
+    x = torch.randn(1, 3, 224,224)
+    hardware = 'FuSe' ## or 'FuSe'
+    arraySizeX = 64
+    arraySizeY = 64
+    lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+    print(name, lat)
 
-print(len(ba))
+# supernet = [MobileNetV3('large', 1000)]
+# for net in supernet:
+#     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
+#     ua, ub = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
+#     ba, bb = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
+# for net in supernetf1:
+#     # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
+#     uc, ud = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
+#     bc, bd = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
+
+# # print(max(a), max(b), max(c), max(d))
+# print("Depthwise Convolution READ BW")
+# for i in range(len(ba)):
+#     if ba[i] != bc[i]:
+#         print("Layer %d Bandwidth DW: %d  FuSe: %d Utilization DW: %f  FuSe: %f"%(i, ba[i], bc[i], ua[i]*100, uc[i]*100))
+
+# print(len(ba))
