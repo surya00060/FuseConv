@@ -25,32 +25,32 @@ def computeCycles(numInput, numTime, numFilter, arrX, arrY):
         weightedUtili = (numInput//arrX) * (numFilter//arrY) * 1.0
 
         if numFolds != 0:
-            maxReadBandwidth = arrX * numTime + numTime * arrY
-            maxWriteBandwidth = arrX * arrY
+            maxReadBandwidth = (arrX * numTime + numTime * arrY)/(arrX + numTime + arrY)
+            maxWriteBandwidth = arrX * arrY/(arrX + numTime + arrY)
 
         if numInput % arrX > 0:
             cycles = cycles + (numFilter//arrY) * (numTime + (numInput % arrX) + arrY - 1)
             numFolds += (numFilter//arrY)
             weightedUtili += (numFilter//arrY) * ((numInput % arrX)*arrY/(arrX * arrY))
 
-            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * arrY)
-            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*arrY)
+            maxReadBandwidth = max(maxReadBandwidth, ((numInput % arrX) * numTime + numTime * arrY)/((numInput % arrX) + numTime + arrY))
+            maxWriteBandwidth = max(maxWriteBandwidth, ((numInput % arrX)*arrY)/((numInput % arrX) + numTime + arrY))
 
         if numFilter % arrY > 0:
             cycles = cycles + (numInput//arrX) * (numTime + arrX + (numFilter % arrY) - 1)
             numFolds += (numInput//arrX)
             weightedUtili += (numInput//arrX) * (arrX*(numFilter % arrY)/(arrX * arrY))
 
-            maxReadBandwidth = max(maxReadBandwidth, arrX * numTime + numTime * (numFilter % arrY) )
-            maxWriteBandwidth = max(maxWriteBandwidth, arrX*(numFilter % arrY))
+            maxReadBandwidth = max(maxReadBandwidth, (arrX * numTime + numTime * (numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
+            maxWriteBandwidth = max(maxWriteBandwidth, (arrX*(numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
 
         if numInput % arrX > 0 and numFilter % arrY > 0:
             cycles = cycles + (numTime + (numInput % arrX) + (numFilter % arrY) - 1)
             numFolds += 1
             weightedUtili += 1 * ((numInput % arrX)*(numFilter % arrY)/(arrX * arrY))
 
-            maxReadBandwidth = max(maxReadBandwidth, (numInput % arrX) * numTime + numTime * (numFilter % arrY))
-            maxWriteBandwidth = max(maxWriteBandwidth, (numInput % arrX)*(numFilter % arrY))
+            maxReadBandwidth = max(maxReadBandwidth, ((numInput % arrX) * numTime + numTime * (numFilter % arrY))/((numInput % arrX) + numTime + (numFilter % arrY)))
+            maxWriteBandwidth = max(maxWriteBandwidth, ((numInput % arrX)*(numFilter % arrY))/((numInput % arrX) + numTime + (numFilter % arrY)))
 
         avgUtilization = weightedUtili/numFolds
         return cycles, avgUtilization, maxReadBandwidth, maxWriteBandwidth
@@ -262,21 +262,21 @@ class ForwardHook:
                         if outDim_h >= self.arraySizeX:
                             if outDim_w >= self.arraySizeY:
                                 u = 1.0
-                                r = arraySizeX * (arraySizeY + k_w)
-                                w = arraySizeX * outDim_w
+                                r = (arraySizeX * (arraySizeY + k_w))/(self.arraySizeY+k_w)
+                                w = (arraySizeX * outDim_w)/(self.arraySizeY+k_w)
                             else:
                                 u = outDim_w/self.arraySizeY
-                                r = arraySizeX * (outDim_w + k_w)
-                                w = arraySizeX * outDim_w
+                                r = (arraySizeX * (outDim_w + k_w))/(self.arraySizeY+k_w)
+                                w = (arraySizeX * outDim_w)/(self.arraySizeY+k_w)
                         else:
                             if outDim_w >= self.arraySizeY:
                                 u = outDim_h/self.arraySizeX
-                                r = outDim_h * (arraySizeY + k_w)
-                                w = outDim_h * arraySizeY
+                                r = (outDim_h * (arraySizeY + k_w))/(self.arraySizeY+k_w)
+                                w = (outDim_h * arraySizeY)/(self.arraySizeY+k_w)
                             else:
                                 u = (outDim_h/self.arraySizeX)*(outDim_w/self.arraySizeY)
-                                r = outDim_h * (outDim_w + k_w)
-                                w = outDim_h * outDim_w
+                                r = (outDim_h * (outDim_w + k_w))/(self.arraySizeY+k_w)
+                                w = (outDim_h * outDim_w)/(self.arraySizeY+k_w)
 
                         self.utilize.updateFuSe(u)
                         self.bandwidth.update(r,w)
@@ -319,21 +319,21 @@ class ForwardHook:
                         if outDim_w >= self.arraySizeX:
                             if outDim_h >= self.arraySizeY:
                                 u = 1.0
-                                r = arraySizeY * (arraySizeX + k_h)
-                                w = arraySizeX * arraySizeY
+                                r = (arraySizeY * (arraySizeX + k_h))/(self.arraySizeY+k_h)
+                                w = (arraySizeX * arraySizeY)/(self.arraySizeY+k_h)
                             else:
                                 u = outDim_h/self.arraySizeY
-                                r = arraySizeY * (outDim_h + k_h)
-                                w = arraySizeX * outDim_h
+                                r = (arraySizeY * (outDim_h + k_h))/(self.arraySizeY+k_h)
+                                w = (arraySizeX * outDim_h)/(self.arraySizeY+k_h)
                         else:
                             if outDim_h >= self.arraySizeY:
                                 u = outDim_w/self.arraySizeX
-                                r = outDim_w * (arraySizeX + k_h)
-                                w = outDim_w * arraySizeX
+                                r = (outDim_w * (arraySizeX + k_h))/(self.arraySizeY+k_h)
+                                w = (outDim_w * arraySizeX)/(self.arraySizeY+k_h)
                             else:
                                 u = (outDim_w/self.arraySizeX)*(outDim_h/self.arraySizeY)
-                                r = outDim_w * (outDim_h + k_h)
-                                w = outDim_w * outDim_h
+                                r = (outDim_w * (outDim_h + k_h))/(self.arraySizeY+k_h)
+                                w = (outDim_w * outDim_h)/(self.arraySizeY+k_h)
                         self.utilize.updateFuSe(u)
                         self.bandwidth.update(r,w)
 
