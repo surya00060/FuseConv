@@ -171,7 +171,63 @@ class MobileBottleneckFriendly(nn.Module):
             return x + out
         else:
             return out
-    
+
+class MobileBottleneckFriendlyBenchmark(nn.Module):
+    def __init__(self, inp, oup, kernel, stride, exp, se=False, nl='RE'):
+        super(MobileBottleneckFriendlyBenchmark, self).__init__()
+        assert stride in [1, 2]
+        assert kernel in [3, 5]
+        padding = (kernel - 1) // 2
+        self.use_res_connect = stride == 1 and inp == oup
+        
+        if nl == 'RE':
+            nlin_layer = nn.ReLU # or ReLU6
+        elif nl == 'HS':
+            nlin_layer = Hswish
+        else:
+            raise NotImplementedError
+        if se:
+            SELayer = SEModule
+        else:
+            SELayer = Identity
+
+        conv_layer = nn.Conv2d
+        norm_layer = nn.BatchNorm2d
+        
+        self.conv1 = conv_layer(inp, exp, 1, 1, 0, bias=False)
+        self.bn1 = norm_layer(exp)
+        self.nl1 = nlin_layer(inplace=True)
+		
+        self.conv2_h = conv_layer(exp, exp, kernel_size=(1, kernel), stride=stride, padding=(0, padding), groups=exp, bias=False)
+        self.bn2_h = norm_layer(exp)
+        # self.conv2_v = conv_layer(exp//2, exp//2, kernel_size=(kernel, 1),stride=stride, padding=(padding, 0), groups=exp//2, bias=False)
+        # self.bn2_v = norm_layer(exp//2)
+        self.se1 = SELayer(exp)
+        self.nl2 = nlin_layer(inplace=True)
+        
+        self.conv3 = conv_layer(exp, oup, 1, 1, 0, bias=False)
+        self.bn3 = norm_layer(oup)
+	 
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.nl1(out)
+        
+        # out1, out2 = out.chunk(2,1)
+        out = self.bn2_h(self.conv2_h(out))
+        # out2 = self.bn2_v(self.conv2_v(out2))
+        # out = torch.cat([out1, out2], 1)
+        out = self.se1(out)
+        out = self.nl2(out)
+        
+        out = self.conv3(out)
+        out = self.bn3(out)
+        
+        if self.use_res_connect:
+            return x + out
+        else:
+            return out
+
 class MobileBottleneckFriendly2(nn.Module):
     def __init__(self, inp, oup, kernel, stride, exp, se=False, nl='RE'):
         super(MobileBottleneckFriendly2, self).__init__()
@@ -340,6 +396,9 @@ def MobileNetV3(mode='small', num_classes=100):
 
 def MobileNetV3Friendly(mode='small', num_classes=100):
     return MobileNetV3Class(MobileBottleneckFriendly, num_classes, mode)
+
+def MobileNetV3FriendlyBenchmark(mode='small', num_classes=100):
+    return MobileNetV3Class(MobileBottleneckFriendlyBenchmark, num_classes, mode)
 
 def MobileNetV3Friendly2(mode='small', num_classes=100):
     return MobileNetV3Class(MobileBottleneckFriendly2, num_classes, mode)
