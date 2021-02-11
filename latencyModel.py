@@ -1,15 +1,9 @@
-import os
-import sys
-import time
-import math
 import math 
-
 import torch
 import torch.nn as nn
 import torch.nn.init as init
-import numpy as np 
-from tqdm import tqdm
-
+import numpy as np
+from models import *
 
 def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
             num_channels, stride_h, stride_w, num_filt, batch_size = 1):
@@ -39,6 +33,7 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         numFolds = 0 ## To compute avearge
         weightedUtili = 0.0
         avgUtilization = 0.0
+        maxUtilization = 0.0
         maxBandwidth = 0.0
         maxReadBandwidth = 0.0
         maxWriteBandwidth = 0.0
@@ -51,33 +46,40 @@ def gemmCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         if numFolds != 0:
             maxReadBandwidth = (arrX * numTime + numTime * arrY)/(arrX + numTime + arrY)
             maxWriteBandwidth =(arrX * arrY)/(arrX + numTime + arrY)
+            maxUtilization = 1.0
 
         if numInput % arrX > 0:
             cycles = cycles + (numFilter//arrY) * (numTime + (numInput % arrX) + arrY - 1)
             numFolds += (numFilter//arrY)
             weightedUtili += (numFilter//arrY) * ((numInput % arrX)*arrY/(arrX * arrY))
 
-            maxReadBandwidth = max(maxReadBandwidth, ((numInput % arrX) * numTime + numTime * arrY)/((numInput % arrX) + numTime + arrY))
-            maxWriteBandwidth = max(maxWriteBandwidth, ((numInput % arrX)*arrY)/((numInput % arrX) + numTime + arrY))
+            if (numFilter//arrY) != 0:
+                maxUtilization = max(maxUtilization, ((numInput % arrX)*arrY/(arrX * arrY)))
+                maxReadBandwidth = max(maxReadBandwidth, ((numInput % arrX) * numTime + numTime * arrY)/((numInput % arrX) + numTime + arrY))
+                maxWriteBandwidth = max(maxWriteBandwidth, ((numInput % arrX)*arrY)/((numInput % arrX) + numTime + arrY))
 
         if numFilter % arrY > 0:
             cycles = cycles + (numInput//arrX) * (numTime + arrX + (numFilter % arrY) - 1)
             numFolds += (numInput//arrX)
             weightedUtili += (numInput//arrX) * (arrX*(numFilter % arrY)/(arrX * arrY))
 
-            maxReadBandwidth = max(maxReadBandwidth, (arrX * numTime + numTime * (numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
-            maxWriteBandwidth = max(maxWriteBandwidth, (arrX*(numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
+            if (numInput//arrX) != 0:
+                maxUtilization = max(maxUtilization, (arrX*(numFilter % arrY)/(arrX * arrY)) )
+                maxReadBandwidth = max(maxReadBandwidth, (arrX * numTime + numTime * (numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
+                maxWriteBandwidth = max(maxWriteBandwidth, (arrX*(numFilter % arrY))/(arrX + numTime + (numFilter % arrY)))
 
         if numInput % arrX > 0 and numFilter % arrY > 0:
             cycles = cycles + (numTime + (numInput % arrX) + (numFilter % arrY) - 1)
             numFolds += 1
             weightedUtili += 1 * ((numInput % arrX)*(numFilter % arrY)/(arrX * arrY))
 
+            maxUtilization = max(maxUtilization, ((numInput % arrX)*(numFilter % arrY)/(arrX * arrY)))
+
             maxReadBandwidth = max(maxReadBandwidth, ((numInput % arrX) * numTime + numTime * (numFilter % arrY))/((numInput % arrX) + numTime + (numFilter % arrY)))
             maxWriteBandwidth = max(maxWriteBandwidth, ((numInput % arrX)*(numFilter % arrY))/((numInput % arrX) + numTime + (numFilter % arrY)))
 
         avgUtilization = weightedUtili/numFolds
-        return cycles, avgUtilization, maxReadBandwidth, maxWriteBandwidth
+        return cycles, maxUtilization, maxReadBandwidth, maxWriteBandwidth
 
 def FuSeCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
             num_channels, stride_h, stride_w, num_filt, batch_size = 1):
@@ -97,7 +99,6 @@ def FuSeCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         E = (H - R + StrideH)//StrideH
         F = (W - S + StrideW)//StrideW
 
-
         num1Dconv = N * H * C
         numFoldsX = num1Dconv/arrX
         numFoldsY = W/arrY
@@ -105,14 +106,11 @@ def FuSeCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
 
         t = math.ceil((math.ceil(numFoldsX)/StrideW)*(oneFoldTime*math.ceil(numFoldsY)))
 
-        # outDim_h = inDim_h/s_h
-        # outDim_w = (inDim_w-k_w+1)/s_w
-
         if  E*C >= arrX:
             if F >= arrY:
                 u = 1.0
                 r = (arrX * (arrY + S))/(arrY + S)
-                w = (arrX * F)/(arrY + S)
+                w = (arrX * arrY)/(arrY + S)
             else:
                 u = F/arrY
                 r = (arrX * ( F + S))/(arrY + S)
@@ -120,12 +118,12 @@ def FuSeCycles(dimension_rows, dimension_cols, ifmap_h, ifmap_w, filt_h, filt_w,
         else:
             if F >= arrY:
                 u = (E*C)/arrX
-                r = (E * (arrY + S))/(arrY + S)
-                w = (E * arrY)/(arrY + S)
+                r = ((E*C) * (arrY + S))/(arrY + S)
+                w = ((E*C) *arrY)/(arrY + S)
             else:
                 u = ((E*C)/arrX)*(F/arrY)
-                r = (E * (F + S))/(arrY+ S)
-                w = (E * F)/(arrY + S)
+                r = ((E*C) * (F + S))/(arrY+ S)
+                w = ((E*C) * F)/(arrY + S)
 
         return t, u, r, w
 class Bandwidth:
@@ -150,12 +148,14 @@ class Latency:
 
 class Utilization:
     def __init__(self):
+        self.layerwiseMaxUtili = []
         self.layerwiseUtilization = []
         self.avgUtilization = 0.0
         self.layercount = 0
         self.sum = 0.0
 
     def update(self, utili):
+        self.layerwiseMaxUtili.append(utili)
         self.layerwiseUtilization.append(utili)
         self.sum += utili
         self.layercount += 1
@@ -306,44 +306,79 @@ def getModelBandw(model, x, arraySizeX=8, arraySizeY=8, hardware='Systolic'):
     hookfn.clear()
     return readBWlist, writeBWlist
 
-# def getModelLatencyBreakdown(model, x, mode='analytical', arraySize=8):    
-#     hookfn = ForwardHook(arraySize, mode)
-#     for layer in model.modules():
-#         if isinstance(layer, nn.Conv2d):
-#             layer.register_forward_hook(hookfn)
-#         elif isinstance(layer, nn.Linear):
-#             layer.register_forward_hook(hookfn)
-#     model(x)
-#     totalLatency = hookfn.time
-#     otherConvLatency = hookfn.otherConv
-#     pointConvLatency = hookfn.pointwiseConv
-#     depthConvLatency = hookfn.depthwiseConv
-#     linearLatency = hookfn.linear
-#     hookfn.clear()
-#     return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
+def getModelLatencyBreakdown(model, x, mode='analytical', arraySize=8):    
+    hookfn = ForwardHook(arraySize, mode)
+    for layer in model.modules():
+        if isinstance(layer, nn.Conv2d):
+            layer.register_forward_hook(hookfn)
+        elif isinstance(layer, nn.Linear):
+            layer.register_forward_hook(hookfn)
+    model(x)
+    totalLatency = hookfn.time
+    otherConvLatency = hookfn.otherConv
+    pointConvLatency = hookfn.pointwiseConv
+    depthConvLatency = hookfn.depthwiseConv
+    linearLatency = hookfn.linear
+    hookfn.clear()
+    return otherConvLatency, pointConvLatency, depthConvLatency, linearLatency
 
-x = torch.randn([1,3,224,224])
-hardware = 'Systolic' ## or 'FuSe'
-arraySizeX = 256
-arraySizeY = 256
-from models import *
-# supernet = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
-supernet = [MobileNetV3('large', 1000)]
-# supernetf1 = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
-supernetf1 = [MobileNetV3FriendlyBenchmark('large', 1000)]
-for net in supernet:
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    ua, ub = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
-    ba, bb = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
-for net in supernetf1:
-    # print( getModelLatency(net, x, arraySizeX, arraySizeY, hardware))
-    uc, ud = getModelUtili(net, x, arraySizeX, arraySizeY, 'FuSe')
-    bc, bd = getModelBandw(net, x, arraySizeX, arraySizeY, 'FuSe')
+def util():
+    x = torch.randn([1,3,224,224])
+    hardware = 'Systolic' ## or 'FuSe'
+    arraySizeX = 64
+    arraySizeY = 64
+    
+    net = MobileNetV3('large', 1000)
+    layerUtilizationBaseline, _ = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
+    
+    hardware = 'FuSe'
+    net = MobileNetV3FriendlyBenchmark('large', 1000)
+    layerUtilizationFriendly, _ = getModelUtili(net, x, arraySizeX, arraySizeY, hardware)
 
-print(len(ba), len(bc))
-print("Depthwise Convolution READ BW")
-for i in range(len(ba)):
-    if ba[i] != bc[i]:
-        print("Layer %d\tBandwidth DW: %f  FuSe: %f \tUtilization DW: %f  FuSe: %f"%(i, ba[i], bc[i], ua[i]*100, uc[i]*100))
+    # print(layerUtilizationBaseline)
+    # print(layerUtilizationFriendly)
+    print(np.mean(layerUtilizationBaseline))
+    print(np.mean(layerUtilizationFriendly))
+    for i, v in enumerate(layerUtilizationBaseline):
+        if v != layerUtilizationFriendly[i]:
+            print(v, layerUtilizationFriendly[i])
 
-# print(len(ba))
+def band():
+    x = torch.randn([1,3,224,224])
+    hardware = 'Systolic' ## or 'FuSe'
+    arraySizeX = 64
+    arraySizeY = 64
+    
+    net = MobileNetV3('large', 1000)
+    rBWbase, wBWbase = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
+    
+    hardware = 'FuSe'
+    net = MobileNetV3FriendlyBenchmark('large', 1000)
+    rBWFriendly, wBWFriendly = getModelBandw(net, x, arraySizeX, arraySizeY, hardware)
+
+    print("Read BW")
+    for i, v in enumerate(rBWbase):
+        if v != rBWFriendly[i]:
+            print(v, rBWFriendly[i])
+
+    print("Write BW")
+    for i, v in enumerate(wBWbase):
+        if v != wBWFriendly[i]:
+            print(v, wBWFriendly[i])    
+    
+    print("Read BW")
+    for i, v in enumerate(rBWbase):
+        if v == rBWFriendly[i]:
+            print(v, rBWFriendly[i])
+
+    print("Write BW")
+    for i, v in enumerate(wBWbase):
+        if v == wBWFriendly[i]:
+            print(v, wBWFriendly[i])
+
+    print("Max Bandwidth")
+    print(max(rBWbase), max(rBWFriendly))
+    print(max(wBWbase), max(wBWFriendly))
+    
+if __name__ == '__main__':
+    band()
