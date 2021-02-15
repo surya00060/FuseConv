@@ -168,7 +168,7 @@ class ForwardHook:
         self.bandwidth = Bandwidth()
         self.arraySizeX = arraySizeX
         self.arraySizeY = arraySizeY
-        assert hardware == 'FuSe'or hardware == 'Systolic'
+        assert hardware == 'FuSe'or hardware == 'Systolic' or hardware == 'Sparse'
         self.hardware = hardware
 
     def __call__(self, module, module_in, module_out):
@@ -241,6 +241,37 @@ class ForwardHook:
                                 ifmap_h=inDim_w, ifmap_w=inDim_h,
                                 filt_h=k_w, filt_w=k_h,
                                 num_channels=inC, stride_h=s_w, stride_w=s_h, num_filt=1)
+
+                        self.utilize.update(u)
+                        self.bandwidth.update(r,w)
+                        self.latency.depthwiseConv += t
+
+                elif self.hardware == 'Sparse':
+                    # On Sparse Mapping, DW Conv is upsampled to Convolution by doing lots of Zero computations.
+                    if k_h != 1 and k_w != 1:
+                        t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                                ifmap_h=inDim_h, ifmap_w=inDim_w,
+                                filt_h=k_h, filt_w=k_w,
+                                num_channels=outC, stride_h=s_h, stride_w=s_w, num_filt=outC)
+                        self.utilize.update(u)
+                        self.bandwidth.update(r,w)
+                        self.latency.depthwiseConv += t
+                    # Case: 1 x K kernel. Assume 1 x K and Kx1 kernel occur symmetrica l.
+                    elif k_h == 1:
+                        t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                                ifmap_h=inDim_h, ifmap_w=inDim_w,
+                                filt_h=k_h, filt_w=k_w,
+                                num_channels=inC,stride_h=s_h, stride_w=s_w, num_filt=inC)
+
+                        self.utilize.update(u)
+                        self.bandwidth.update(r,w)
+                        self.latency.depthwiseConv += t
+                    
+                    elif k_w == 1:
+                        t, u, r, w = gemmCycles(dimension_rows=self.arraySizeX, dimension_cols=self.arraySizeY, 
+                                ifmap_h=inDim_w, ifmap_w=inDim_h,
+                                filt_h=k_w, filt_w=k_h,
+                                num_channels=inC, stride_h=s_w, stride_w=s_h, num_filt=inC)
 
                         self.utilize.update(u)
                         self.bandwidth.update(r,w)
@@ -379,6 +410,44 @@ def band():
     print("Max Bandwidth")
     print(max(rBWbase), max(rBWFriendly))
     print(max(wBWbase), max(wBWFriendly))
+    print("Average Bandwidth")
+    print(np.mean(rBWbase), np.mean(rBWFriendly), np.mean(wBWbase), np.mean(wBWFriendly))
+
+def sparseMapping():
+    num_classes = 1000
+    baseline = [MobileNetV1(1000), MobileNetV2(1000), MnasNet(1000), MobileNetV3('small', 1000), MobileNetV3('large', 1000)]
+    fuSeHalf = [MobileNetV1Friendly(1000), MobileNetV2Friendly(1000), MnasNetFriendly(1000), MobileNetV3Friendly('small', 1000), MobileNetV3Friendly('large', 1000)]
+
     
+    l3 = []
+    l4 = []
+
+    x = torch.randn([1,3,224,224])
+    
+    for size in [32, 64, 128, 256]:
+        l1 = []
+        l2 = []
+        arraySizeX = size
+        arraySizeY = size
+    
+        hardware = 'Systolic'
+        for net in baseline:
+            lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+            l1.append(lat)
+        print(l1)
+
+        hardware = 'Sparse'
+        for net in baseline:
+            lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+            l2.append(lat)
+        print(l2)
+
+    # hardware = 'FuSe'
+    # for net in fuSeHalf:
+    #     lat = getModelLatency(net, x, arraySizeX, arraySizeY, hardware)
+    #     l3.append(lat)
+    # print(l3)
+
+
 if __name__ == '__main__':
-    band()
+    sparseMapping()
